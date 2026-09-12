@@ -90,6 +90,8 @@ function DealPlan({ deal, plan, late, onChanged }) {
   const dalamTenggang = items.filter((i) => planState(i, late).key === "dalam_tenggang");
   const overdueAmount = overdue.reduce(
     (a, i) => a + (Number(i.amount || 0) - paidOf(i)), 0);
+  const bankItems = items.filter((i) => i.payer === "bank");
+  const bankOutstanding = bankItems.reduce((a, i) => a + (Number(i.amount || 0) - paidOf(i)), 0);
 
   return (
     <div data-testid={CRMC.planDeal} className="space-y-3 rounded-xl border bg-card p-4 shadow-[var(--shadow-card)]">
@@ -121,6 +123,14 @@ function DealPlan({ deal, plan, late, onChanged }) {
           </div>
         ))}
       </div>
+      {bankOutstanding > 0 || bankItems.length ? (
+        <p data-testid={`${CRMC.planSummary}-payer`} className="flex items-start gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-2 text-[12px] text-sky-900">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            Sisa <b>porsi pembeli</b> (disetor sendiri) <MoneyText value={outstanding - bankOutstanding} /> · sisa <b>porsi bank</b> <MoneyText value={bankOutstanding} /> dilunasi lewat pencairan KPR — bukan lewat kuitansi setoran pembeli.
+          </span>
+        </p>
+      ) : null}
 
       {overdue.length ? (
         <p data-testid={CRMC.planOverdue}
@@ -165,7 +175,11 @@ function DealPlan({ deal, plan, late, onChanged }) {
               return (
                 <tr key={`${it.label || "termin"}-${i}`} data-testid={CRMC.planRow}
                   data-state={st.key} className="border-t">
-                  <td className="px-3 py-2 font-medium">{it.label || `Termin ${i + 1}`}</td>
+                  <td className="px-3 py-2 font-medium">{it.label || `Termin ${i + 1}`}
+                    {it.payer === "bank" ? (
+                      <span data-testid={`${CRMC.planRow}-bank`} className="ml-1.5 rounded-full bg-sky-100 px-1.5 text-[10px] font-normal text-sky-800">porsi bank · pencairan KPR</span>
+                    ) : null}
+                  </td>
                   <td className="px-3 py-2 text-muted-foreground">
                     {it.due_date ? formatDateWIB(it.due_date) : "belum dijadwalkan"}
                   </td>

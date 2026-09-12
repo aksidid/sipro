@@ -107,7 +107,7 @@ async def _buyer_and_payment(org: str, unit: dict, name: str, phone: str,
         # subledger tetap tie-out dengan buku besar.
         await fe.apply_receipt(deal["id"], int(inv["outstanding"]), "transfer",
                                "Pelunasan (data demo) — rumah siap serah terima",
-                               "seed", org)
+                               "seed", org, allow_bank_portion=True)
     await db.ar_invoices.update_one({"org_id": org, "deal_id": deal["id"]},
                                     {"$set": {"demo_batch": BATCH, "demo_marker": marker}})
     return deal

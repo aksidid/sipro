@@ -66,6 +66,8 @@ async def list_ar(status: str = None, q: str = None, sort: str = None, direction
         r["unit_total"] = int(r.get("unit_total") if r.get("unit_total") is not None
                               else int(r.get("total") or 0) - r["addon_total"])
         r["buyer_total"] = int(bd.get("buyer_total") or (int(r.get("total") or 0) + r["cost_total"]))
+        r["bank_outstanding"] = fe.bank_outstanding(r)
+        r["buyer_outstanding"] = fe.buyer_outstanding(r)
     # Angka per status HARUS memakai kosakata yang benar-benar ditulis mesin keuangan
     # (`finance_engine`: unpaid → partial → paid, sama dengan SSOT `reference.ar_status`).
     # Sebelum ini daftar di sini berisi "draft/open/void" yang TIDAK PERNAH ADA di data,
@@ -145,13 +147,15 @@ async def ar_detail(deal_id: str, user: dict = Depends(require_permission("finan
     rev = await db.revenue_recognitions.find_one({"org_id": org, "deal_id": deal_id}, {"_id": 0})
     dep = await db.customer_deposits.find_one({"org_id": org, "deal_id": deal_id}, {"_id": 0})
     cost_invoices = await db.cost_invoices.find({"org_id": org, "deal_id": deal_id}, {"_id": 0}).to_list(20)
-    if not inv.get("breakdown"):
-        deal = await db.deals.find_one({"id": deal_id}, {"_id": 0}) or {}
-        inv["breakdown"] = fe.ar_breakdown(deal) if deal else None
+    # Rincian mengikuti kontrak (skema all-in dipilih/diamandemen sesudah reservasi ikut tampil).
+    inv["breakdown"] = await fe.live_breakdown(org, inv) or inv.get("breakdown")
     inv["addon_total"] = int(inv.get("addon_total") or 0)
     inv["unit_total"] = int(inv.get("unit_total") if inv.get("unit_total") is not None
                             else int(inv.get("total") or 0) - inv["addon_total"])
     inv["kpr_outstanding"] = fe.kpr_outstanding(inv)
+    inv["bank_outstanding"] = fe.bank_outstanding(inv)
+    inv["buyer_outstanding"] = fe.buyer_outstanding(inv)
+    inv["bank_total"] = sum(int(i.get("amount") or 0) for i in inv.get("items") or [] if fe.is_bank_item(i))
     return {"data": serialize_doc(inv), "receipts": serialize_doc(receipts),
             "contract_liability": serialize_doc(liab), "revenue_recognition": serialize_doc(rev),
             "deposit": serialize_doc(dep), "cost_invoices": serialize_doc(cost_invoices)}
@@ -187,7 +191,8 @@ async def create_receipt(payload: ReceiptCreate,
                                      allow_overpay=payload.allow_overpay,
                                      cash_account_id=payload.cash_account_id,
                                      targets={a.item_id: a.amount for a in (payload.allocations or [])} or None,
-                                     proof_file_ids=payload.proof_file_ids)
+                                     proof_file_ids=payload.proof_file_ids,
+                                     allow_bank_portion=payload.allow_bank_portion)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"data": serialize_doc(res)}

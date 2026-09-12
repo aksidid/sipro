@@ -178,7 +178,7 @@ async def disburse(org: str, contract: dict, app: dict, payload: dict, user: dic
     tahap tidak 2×, koreksi nominal dalam toleransi (finance saja)."""
     actor = user.get("email")
     role = user.get("role")
-    if not (app.get("akad") or {}).get("date"):
+    if not ((app.get("akad") or {}).get("date") or (contract.get("legal") or {}).get("akad_kredit")):
         raise ValueError("Pencairan butuh akad kredit yang sudah tercatat.")
     inv = await db.ar_invoices.find_one({"org_id": org, "deal_id": contract["deal_id"]}, {"_id": 0})
     if not inv:

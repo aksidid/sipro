@@ -12,6 +12,7 @@ contract_liabilities, ap_invoices, payments_out, commissions, revenue_recognitio
 Uang IDR integer; waktu UTC ISO-8601.
 """
 import logging
+import re
 from datetime import datetime, timedelta
 
 import sequences as seq
@@ -139,11 +140,44 @@ def compute_scheme_items(scheme: dict, price: int, base_date_iso: str) -> list:
                     "grace_days": int(i.get("grace_days") or 0),
                     "due_rule": i.get("due_rule"),
                     "event_based": bool(i.get("event") or i.get("event_based")),
+                    "payer": "bank" if i.get("payer") == "bank" else "buyer",
                     "status": "unpaid", "paid_amount": 0})
     # Rekonsiliasi ke harga bila skema all-percent menjumlah ~100%.
     if out and all_percent and 99 <= pct_sum <= 101:
         out[-1]["amount"] += price - sum(x["amount"] for x in out)
     return out
+
+
+_BANK_LABEL = re.compile(r"kpr|pencairan|plafon|\bbank\b", re.IGNORECASE)
+
+
+def infer_bank_items(items: list, is_kpr: bool) -> list:
+    """Skema KPR yang belum menandai termin bank secara eksplisit: termin berlabel
+    'KPR/pencairan/bank/plafon' = PORSI BANK (dilunasi pencairan, bukan disetor pembeli)."""
+    if not is_kpr or any(i.get("payer") == "bank" for i in items):
+        return items
+    for i in items:
+        if i.get("kpr_excluded") or i.get("basis") == "addon":
+            continue
+        if _BANK_LABEL.search(str(i.get("label") or "")):
+            i["payer"] = "bank"
+    return items
+
+
+def is_bank_item(item: dict) -> bool:
+    return item.get("payer") == "bank" and not item.get("kpr_excluded")
+
+
+def bank_outstanding(inv: dict) -> int:
+    """Sisa PORSI BANK (termin yang dilunasi pencairan KPR)."""
+    return sum(int(i.get("amount") or 0) - int(i.get("paid_amount") or 0)
+               for i in inv.get("items") or [] if is_bank_item(i))
+
+
+def buyer_outstanding(inv: dict) -> int:
+    """Sisa yang wajib DISETOR PEMBELI SENDIRI (di luar porsi bank)."""
+    return sum(int(i.get("amount") or 0) - int(i.get("paid_amount") or 0)
+               for i in inv.get("items") or [] if not is_bank_item(i))
 
 
 from pricing_engine import apply_component_discounts, dp_term_index  # noqa: E402
@@ -189,6 +223,48 @@ def ar_breakdown(deal: dict) -> dict:
         "buyer_total": net + cost_total + addon_net,
         "payment_breakdown": pricing.get("payment_breakdown"),
     }
+
+
+async def live_breakdown(org_id: str, inv: dict) -> dict:
+    """Rincian tagihan pembeli yang MENGIKUTI kontrak: komponen all-in yang dipilih/diamandemen
+    di kontrak (harga exclude → biaya ditagih terpisah) ikut tampil di piutang, walau snapshot
+    deal saat reservasi belum memuatnya."""
+    deal = await db.deals.find_one({"id": inv["deal_id"]}, {"_id": 0}) or {}
+    contract = await db.contracts.find_one({"org_id": org_id, "deal_id": inv["deal_id"]},
+                                           {"_id": 0, "costs": 1, "scheme": 1}) or {}
+    ccosts = contract.get("costs") or {}
+    if ccosts.get("components"):
+        comps = [c for c in ccosts["components"]
+                 if not (c.get("kpr_only") and contract.get("scheme") != "kpr")]
+        deal = {**deal, "costs": {**ccosts, "components": comps}}
+    bd = ar_breakdown(deal) if deal else (inv.get("breakdown") or {})
+    pb = bd.get("payment_breakdown")
+    comps = bd.get("cost_components") or []
+    if pb and comps and not any(str(r.get("code") or "").startswith("COST") for r in pb.get("rows") or []):
+        rows = [r for r in pb["rows"] if r.get("code") not in ("TOTAL", "AFTER_BOOKING_FEE")]
+        buyer_costs = 0
+        for c in comps:
+            dev = c.get("treatment") == "developer_borne"
+            rows.append({"code": f"COST:{c.get('code')}", "label": c.get("name") or c.get("code"),
+                         "amount": int(c.get("gross") or c.get("amount") or 0), "group": "biaya",
+                         "developer_borne": dev,
+                         "hint": "ditanggung developer" if dev else "ditagih terpisah (invoice biaya)"})
+            if int(c.get("discount") or 0):
+                rows.append({"code": f"COSTDISC:{c.get('code')}", "label": f"Potongan ({c.get('name')})",
+                             "amount": -int(c["discount"]), "group": "potongan_biaya", "developer_borne": dev})
+            if not dev:
+                buyer_costs += int(c.get("amount") or 0)
+        rows.append({"code": "COST_TOTAL", "label": f"Total biaya ditagih ke pembeli · {bd.get('allin_scheme_name') or 'all-in'}",
+                     "amount": buyer_costs, "group": "subtotal"})
+        total = int(bd.get("buyer_total") or 0)
+        bf = int(pb.get("booking_fee") or bd.get("booking_fee") or 0)
+        rows.append({"code": "TOTAL", "label": "Total dibayar pembeli", "amount": total, "group": "total",
+                     "hint": "harga bersih unit + add-on + biaya all-in pembeli"})
+        rows.append({"code": "AFTER_BOOKING_FEE", "label": "Sisa yang ditagih setelah booking fee",
+                     "amount": total - bf, "group": "total"})
+        bd["payment_breakdown"] = {**pb, "rows": rows, "buyer_costs": buyer_costs, "total": total,
+                                   "remaining_after_booking_fee": total - bf, "has_costs": True}
+    return bd
 
 
 def addon_net_of(deal: dict) -> int:
@@ -247,6 +323,10 @@ async def create_ar_for_deal(deal: dict, scheme_id=None, org_id=ORG_ID, replace=
     comp = ((deal.get("pricing") or {}).get("by_target") or {})
     comp_amt = int(comp.get("dp") or 0) + int(comp.get("booking_fee") or 0)
     items = apply_component_discounts(compute_scheme_items(scheme, price + comp_amt, base_date), comp)
+    # Skema KPR: termin bank ditandai → hanya pencairan bank yang boleh melunasinya.
+    is_kpr_deal = (scheme.get("kind") or scheme.get("type")) == "kpr" or bool(
+        await db.contracts.find_one({"org_id": org_id, "deal_id": deal_id, "scheme": "kpr"}, {"_id": 0, "id": 1}))
+    items = infer_bank_items(items, is_kpr_deal)
     unit_total = sum(i["amount"] for i in items)
     # Add-on = baris tagihan TERPISAH (bukan termin unit, bukan dasar KPR).
     import settings_store as cfg
@@ -320,12 +400,16 @@ async def create_ar_for_deal(deal: dict, scheme_id=None, org_id=ORG_ID, replace=
     return inv
 
 
-def _allocate(items: list, amount: int, targets: dict = None, skip_kpr_excluded: bool = False) -> tuple:
+def _allocate(items: list, amount: int, targets: dict = None, skip_kpr_excluded: bool = False,
+              payer: str = None, allow_bank_portion: bool = False) -> tuple:
     """Alokasi uang ke item termin. Mengubah `items` di tempat.
 
     `targets` = {item_id: nominal} — alokasi yang DIPILIH kasir/pembeli didahulukan (jelas
     termin mana yang dibayar); sisanya (bila ada) jatuh ke termin jatuh tempo terlama (FIFO).
     `skip_kpr_excluded` (pencairan KPR): baris add-on `kpr_excluded` TIDAK boleh dilunasi bank.
+    `payer="buyer"` (setoran pembeli): FIFO melewati PORSI BANK; alokasi eksplisit ke porsi bank
+    hanya bila `allow_bank_portion` (pembeli memang melunasi sendiri porsi KPR-nya).
+    `payer="bank"` (pencairan): porsi bank didahulukan, lalu termin unit lain.
     Return (allocations, remaining). `remaining` > 0 berarti uangnya melebihi seluruh sisa tagihan.
     """
     remaining = int(amount)
@@ -336,6 +420,9 @@ def _allocate(items: list, amount: int, targets: dict = None, skip_kpr_excluded:
             raise ValueError("Termin tujuan alokasi tidak ditemukan pada jadwal tagihan ini.")
         if skip_kpr_excluded and it.get("kpr_excluded"):
             raise ValueError(f"'{it['label']}' ditagih terpisah dan tidak boleh dilunasi pencairan KPR.")
+        if payer == "buyer" and is_bank_item(it) and not allow_bank_portion:
+            raise ValueError(f"'{it['label']}' adalah PORSI BANK — dilunasi lewat pencairan KPR, bukan "
+                             "setoran pembeli. Centang 'pembeli melunasi porsi KPR sendiri' bila memang demikian.")
         out = it["amount"] - it.get("paid_amount", 0)
         want = int(want or 0)
         if want <= 0:
@@ -348,10 +435,15 @@ def _allocate(items: list, amount: int, targets: dict = None, skip_kpr_excluded:
         it["status"] = "paid" if it["paid_amount"] >= it["amount"] else "partial"
         remaining -= want
         allocations.append({"item_id": it["id"], "label": it["label"], "amount": want, "chosen": True})
-    for it in sorted(items, key=lambda x: x.get("due_date") or ""):
+    order = sorted(items, key=lambda x: x.get("due_date") or "")
+    if payer == "bank":
+        order = [x for x in order if is_bank_item(x)] + [x for x in order if not is_bank_item(x)]
+    for it in order:
         if remaining <= 0:
             break
         if skip_kpr_excluded and it.get("kpr_excluded"):
+            continue
+        if payer == "buyer" and is_bank_item(it) and not allow_bank_portion:
             continue
         out = it["amount"] - it.get("paid_amount", 0)
         if out <= 0:
@@ -365,9 +457,13 @@ def _allocate(items: list, amount: int, targets: dict = None, skip_kpr_excluded:
 
 
 def kpr_outstanding(inv: dict) -> int:
-    """Sisa piutang yang BOLEH dilunasi pencairan KPR = termin unit saja (tanpa baris add-on)."""
+    """Sisa piutang yang BOLEH dilunasi pencairan KPR: porsi bank bila skema menandainya,
+    selain itu seluruh termin unit (tanpa baris add-on)."""
+    items = inv.get("items") or []
+    if any(is_bank_item(i) for i in items):
+        return bank_outstanding(inv)
     return sum(int(i.get("amount") or 0) - int(i.get("paid_amount") or 0)
-               for i in inv.get("items") or [] if not i.get("kpr_excluded"))
+               for i in items if not i.get("kpr_excluded"))
 
 
 async def _recalc_invoice(inv: dict, items: list, ts: str) -> tuple:
@@ -396,7 +492,7 @@ async def _after_paid_off(inv: dict, deal_id: str, org_id: str):
 
 async def apply_receipt(deal_id, amount, method, note, actor, org_id=ORG_ID,
                         allow_overpay=False, cash_account_id=None, targets: dict = None,
-                        proof_file_ids: list = None) -> dict:
+                        proof_file_ids: list = None, allow_bank_portion: bool = False) -> dict:
     """Terima pembayaran -> alokasi ke item termin (pilihan kasir dulu, lalu jatuh tempo terlama) ->
     recalc outstanding -> naikkan contract_liability -> update unit.payment_status.
 
@@ -404,6 +500,9 @@ async def apply_receipt(deal_id, amount, method, note, actor, org_id=ORG_ID,
     Default kelebihan bayar DITOLAK; bila kasir sengaja menerimanya (`allow_overpay`),
     kelebihan dicatat sebagai **titipan pelanggan** (`customer_deposits`) dan dijurnal
     ke `2-1450` — jadi kas di GL selalu sama dengan kas yang benar-benar diterima.
+
+    Setoran pembeli (method ≠ kpr) TIDAK melunasi PORSI BANK: termin itu menunggu pencairan
+    KPR. Bila pembeli memang melunasi porsi KPR-nya sendiri → `allow_bank_portion`.
     """
     inv = await db.ar_invoices.find_one({"org_id": org_id, "deal_id": deal_id}, {"_id": 0})
     if not inv:
@@ -414,11 +513,18 @@ async def apply_receipt(deal_id, amount, method, note, actor, org_id=ORG_ID,
     outstanding_before = int(inv.get("outstanding", inv["total"] - inv.get("paid", 0)))
     if is_kpr:
         outstanding_before = kpr_outstanding(inv)
-    allocations, excess = _allocate(items, amount, targets, skip_kpr_excluded=is_kpr)
+    elif not allow_bank_portion:
+        outstanding_before = buyer_outstanding(inv)
+    allocations, excess = _allocate(items, amount, targets, skip_kpr_excluded=is_kpr,
+                                    payer="bank" if is_kpr else "buyer",
+                                    allow_bank_portion=allow_bank_portion)
     if excess > 0 and not allow_overpay:
+        bank_left = bank_outstanding(inv)
+        hint = (f" Porsi bank Rp {bank_left:,} menunggu pencairan KPR dan tidak dihitung di sini."
+                if (not is_kpr and not allow_bank_portion and bank_left > 0) else "")
         raise ValueError(
             f"Jumlah Rp {amount:,} melebihi sisa tagihan Rp {outstanding_before:,} "
-            f"(kelebihan Rp {excess:,}). Centang \u201cCatat kelebihan sebagai titipan "
+            f"(kelebihan Rp {excess:,}).{hint} Centang \u201cCatat kelebihan sebagai titipan "
             f"pelanggan\u201d bila pembayaran ini memang diterima.")
     applied = amount - excess
     ts = now_iso()
@@ -539,18 +645,19 @@ async def apply_deposit(deal_id, amount, actor, org_id=ORG_ID, note=None) -> dic
     balance = int((dep or {}).get("balance", 0))
     if balance <= 0:
         raise ValueError("Tidak ada saldo titipan untuk deal ini.")
-    outstanding = int(inv.get("outstanding", 0))
+    outstanding = buyer_outstanding(inv)
     if outstanding <= 0:
-        raise ValueError("Tagihan sudah lunas — titipan hanya bisa dikembalikan ke pelanggan.")
+        raise ValueError("Tagihan porsi pembeli sudah lunas — titipan hanya bisa dikembalikan ke pelanggan "
+                         "(porsi bank menunggu pencairan KPR).")
     amount = int(amount or min(balance, outstanding))
     if amount <= 0:
         raise ValueError("Nominal harus lebih dari 0.")
     if amount > balance:
         raise ValueError(f"Nominal Rp {amount:,} melebihi saldo titipan Rp {balance:,}.")
     if amount > outstanding:
-        raise ValueError(f"Nominal Rp {amount:,} melebihi sisa tagihan Rp {outstanding:,}.")
+        raise ValueError(f"Nominal Rp {amount:,} melebihi sisa tagihan porsi pembeli Rp {outstanding:,}.")
     items = inv["items"]
-    allocations, remaining = _allocate(items, amount)
+    allocations, remaining = _allocate(items, amount, payer="buyer")
     ts = now_iso()
     paid, outstanding_after, status = await _recalc_invoice(inv, items, ts)
     receipt = {

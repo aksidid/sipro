@@ -476,6 +476,26 @@ async def akad_mirror() -> dict:
     return {"deals_akad_at": n} if n else {}
 
 
+async def bank_portion_items() -> dict:
+    """Tandai PORSI BANK pada jadwal AR kontrak KPR lama (termin berlabel KPR/pencairan/bank)
+    supaya setoran pembeli tidak lagi melunasi termin yang seharusnya menunggu pencairan."""
+    import finance_engine as fe
+    n = 0
+    kpr_deals = {c["deal_id"] async for c in db.contracts.find({"scheme": "kpr"}, {"_id": 0, "deal_id": 1})}
+    kpr_schemes = {s["id"] async for s in db.payment_schemes.find({"kind": "kpr"}, {"_id": 0, "id": 1})}
+    cur = db.ar_invoices.find({"items.payer": {"$exists": False}}, {"_id": 0, "id": 1, "deal_id": 1,
+                                                                    "scheme_id": 1, "items": 1})
+    async for inv in cur:
+        is_kpr = inv.get("deal_id") in kpr_deals or inv.get("scheme_id") in kpr_schemes
+        items = inv.get("items") or []
+        for i in items:
+            i.setdefault("payer", "buyer")
+        fe.infer_bank_items(items, is_kpr)
+        await db.ar_invoices.update_one({"id": inv["id"]}, {"$set": {"items": items}})
+        n += 1 if any(i.get("payer") == "bank" for i in items) else 0
+    return {"ar_bank_portion_tagged": n} if n else {}
+
+
 async def run_migrations() -> dict:
     """Semua migrasi (idempoten). Dipanggil di lifespan setelah ensure_indexes."""
     enums = await canonicalize_enums()
@@ -489,6 +509,9 @@ async def run_migrations() -> dict:
     reminder_ident = await reminder_recipient_identity()
     receipt_nos = await receipt_numbers()
     akad = await akad_mirror()
+    bank_items = await bank_portion_items()
+    if bank_items:
+        logger.info("Migrasi porsi bank pada AR KPR: %s", bank_items)
     if akad:
         logger.info("Migrasi cermin akad ke deals: %s", akad)
     if receipt_nos:

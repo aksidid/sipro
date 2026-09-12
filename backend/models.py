@@ -433,6 +433,7 @@ class ReceiptCreate(BaseModel):
     cash_account_id: Optional[str] = None   # Fase 82: rekening/kas tempat uang mendarat
     allocations: Optional[List[ReceiptAllocation]] = None   # termin yang dipilih kasir (sisanya FIFO)
     proof_file_ids: List[str] = []   # bukti bayar (struk transfer/foto) — tampil di semua laporan
+    allow_bank_portion: bool = False   # pembeli melunasi sendiri PORSI BANK (bukan lewat pencairan KPR)
 
 
 class ApBillCreate(BaseModel):

@@ -30,6 +30,7 @@ class TermIn(BaseModel):
     grace_days: int = 0
     event_code: Optional[str] = None
     note: Optional[str] = None
+    payer: str = "buyer"   # buyer | bank (porsi yang dilunasi pencairan KPR)
 
     @field_validator("label")
     @classmethod

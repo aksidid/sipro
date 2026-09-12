@@ -355,6 +355,17 @@ export default function PaymentSchemePanel() {
                     <Input className="sm:col-span-2" data-testid={P57.termGrace} type="number"
                       value={t.grace_days || 0} placeholder="Toleransi (hari)"
                       onChange={(e) => ubahTerm(i, { grace_days: e.target.value })} />
+                    {form.kind === "kpr" ? (
+                      <label className="flex items-center gap-2 text-[11px] sm:col-span-4"
+                        data-testid={`${P57.termRow}-payer`}>
+                        <Switch checked={t.payer === "bank"}
+                          data-testid={`${P57.termRow}-payer-switch`}
+                          onCheckedChange={(v) => ubahTerm(i, { payer: v ? "bank" : "buyer" })} />
+                        <span className={t.payer === "bank" ? "font-medium text-sky-800" : "text-muted-foreground"}>
+                          {t.payer === "bank" ? "Porsi BANK — dilunasi pencairan KPR" : "Disetor pembeli sendiri"}
+                        </span>
+                      </label>
+                    ) : null}
                     <p className="text-[11px] text-muted-foreground sm:col-span-12">
                       {t.due_rule || "Aturan jatuh tempo akan tampil di pratinjau."}
                     </p>
@@ -382,6 +393,7 @@ export default function PaymentSchemePanel() {
                     className="flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span>
                       {r.no}. {r.label}{" "}
+                      {r.payer === "bank" ? <span className="rounded-full bg-sky-100 px-1.5 text-[10px] font-medium text-sky-800">porsi bank</span> : null}{" "}
                       <span className="text-muted-foreground">
                         ({r.basis_label}) · {r.due_rule}
                         {r.event_based ? " · tanggal perkiraan" : ""}

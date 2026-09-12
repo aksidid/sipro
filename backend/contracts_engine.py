@@ -325,7 +325,7 @@ async def _builtin_spec(org: str, scheme: str) -> dict:
         items.append({"label": f"Uang muka (DP) {dp:g}%", "basis": "percent", "value": dp,
                       "due_offset_days": 0, "due_rule": "sebelum akad kredit"})
     items.append({"label": f"Pencairan KPR {100 - dp:g}%", "basis": "percent",
-                  "value": 100 - dp, "due_offset_days": 45,
+                  "value": 100 - dp, "due_offset_days": 45, "payer": "bank",
                   "due_rule": "setelah akad kredit (dana masuk dari bank)", "event": True})
     return {"code": "kpr", "name": f"KPR (DP {dp:g}% + pencairan bank)", "items": items}
 
@@ -746,6 +746,14 @@ async def legal_advance(org: str, contract_id: str, stage: str, payload: dict,
     deal_set = {"updated_at": ts, f"legal_dates.{stage}": entry["date"]}
     if stage == "akad_kredit":
         deal_set["akad_at"] = entry["date"]
+        # Cermin ke pengajuan KPR: pencairan bank membaca `financing_apps.akad.date`.
+        await db.financing_apps.update_many(
+            {"org_id": org, "deal_id": c["deal_id"],
+             "$or": [{"akad.date": {"$exists": False}}, {"akad.date": None}, {"akad.date": ""}]},
+            {"$set": {"akad": {"date": entry["date"], "number": number, "notary": entry.get("notary"),
+                               "file_id": entry.get("file_id"), "at": ts, "by": actor,
+                               "note": "Dicatat dari tahap legal kontrak."},
+                      "updated_at": ts}})
     await db.customers.update_one({"id": c.get("customer_id")}, {"$set": {
         "contract_legal_stage": stage, f"legal_dates.{stage}": entry["date"],
         "updated_at": ts}})

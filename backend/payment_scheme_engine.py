@@ -87,6 +87,8 @@ def normalize_terms(terms: list) -> list:
             "grace_days": int(t.get("grace_days") or 0),
             "event_code": t.get("event_code") or None,
             "note": (t.get("note") or None),
+            # Siapa yang membayar termin ini: pembeli sendiri, atau BANK lewat pencairan KPR.
+            "payer": "bank" if t.get("payer") == "bank" else "buyer",
         }
         row["due_rule"] = due_sentence(row)
         row["event"] = row["due_mode"] == "event"

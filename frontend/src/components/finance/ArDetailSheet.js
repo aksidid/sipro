@@ -128,6 +128,12 @@ export default function ArDetailSheet({ dealId, open, onOpenChange, onChanged })
               <Stat label="Terbayar" value={formatIDR(inv.paid)} tone="text-emerald-700" />
               <Stat label="Sisa" value={formatIDR(inv.outstanding)} tone="text-amber-700" />
             </div>
+            {Number(inv.bank_total || 0) > 0 ? (
+              <div data-testid="ar-payer-split" className="grid grid-cols-2 gap-3">
+                <Stat label="Sisa porsi pembeli (disetor sendiri)" value={formatIDR(inv.buyer_outstanding)} tone="text-amber-700" />
+                <Stat label="Sisa porsi bank (pencairan KPR)" value={formatIDR(inv.bank_outstanding)} tone="text-sky-700" />
+              </div>
+            ) : null}
             {Number(inv.addon_total || 0) > 0 ? (
               <p data-testid="ar-unit-addon-split" className="text-[11px] text-muted-foreground">
                 Piutang unit {formatIDR(inv.unit_total)} (dasar termin / KPR) + add-on {formatIDR(inv.addon_total)} (tagihan terpisah, bukan KPR)
@@ -161,11 +167,38 @@ export default function ArDetailSheet({ dealId, open, onOpenChange, onChanged })
                   </div>
                 )}
                 <div data-testid="ar-cost-invoices" className="rounded-lg border bg-card p-3 text-sm shadow-[var(--shadow-card)]">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Piutang biaya (per komponen all-in)</p>
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Piutang biaya (per komponen all-in{inv.breakdown.allin_scheme_name ? ` · ${inv.breakdown.allin_scheme_name}` : ""})
+                  </p>
+                  {(inv.breakdown.cost_components || []).length ? (
+                    <div data-testid="ar-cost-components" className="mt-1.5 space-y-0.5">
+                      {inv.breakdown.cost_components.map((c) => {
+                        const dev = c.treatment === "developer_borne";
+                        const billed = (data.costInvoices || []).some((ci) => ci.status !== "void" && (ci.items || []).some((it) => it.code === c.code));
+                        return (
+                          <div key={c.code} data-testid="ar-cost-component-row" data-treatment={c.treatment}
+                            className="flex items-center justify-between gap-2 text-xs">
+                            <span className={dev ? "text-muted-foreground" : ""}>
+                              {c.name}
+                              <span className={`ml-1.5 rounded-full px-1.5 text-[10px] ${dev ? "bg-slate-100 text-slate-700" : billed ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800"}`}>
+                                {dev ? "ditanggung developer" : billed ? "ditagih (INB)" : "exclude · belum ditagih"}
+                              </span>
+                              {c.discount ? <span className="ml-1 text-rose-700">(−{formatIDR(c.discount)} promo)</span> : null}
+                            </span>
+                            <span className={`tabular-nums ${dev ? "text-muted-foreground line-through" : ""}`}>{formatIDR(c.amount)}</span>
+                          </div>
+                        );
+                      })}
+                      <div className="flex justify-between border-t pt-1 text-xs font-medium">
+                        <span>Total biaya ditagih ke pembeli</span>
+                        <span className="tabular-nums">{formatIDR(inv.breakdown.cost_total)}</span>
+                      </div>
+                    </div>
+                  ) : null}
                   {!(data.costInvoices || []).length ? (
                     <p className="mt-1 text-xs text-muted-foreground">
                       {Number(inv.breakdown.cost_total || 0) > 0
-                        ? `Biaya pembeli ${formatIDR(inv.breakdown.cost_total)} belum ditagih — invoice biaya terbit otomatis saat deal dijadikan pembeli (kontrak).`
+                        ? `Biaya pembeli ${formatIDR(inv.breakdown.cost_total)} belum ditagih — invoice biaya terbit otomatis saat deal dijadikan pembeli (kontrak), atau lewat tombol Terbitkan Invoice Biaya di Rencana Bayar pelanggan.`
                         : "Tidak ada biaya yang ditagih ke pembeli (all-in developer / skema belum dipilih)."}
                     </p>
                   ) : data.costInvoices.map((ci) => (
@@ -226,12 +259,15 @@ export default function ArDetailSheet({ dealId, open, onOpenChange, onChanged })
               <h4 className="font-heading text-sm font-semibold">Jadwal Termin</h4>
               <div className="mt-2 space-y-2">
                 {(inv.items || []).map((it) => (
-                  <div key={it.id} data-testid="ar-item" data-basis={it.basis} data-kpr-excluded={it.kpr_excluded ? "1" : "0"}
+                  <div key={it.id} data-testid="ar-item" data-basis={it.basis} data-payer={it.payer || "buyer"} data-kpr-excluded={it.kpr_excluded ? "1" : "0"}
                     className="flex items-center justify-between rounded-lg border bg-card p-2.5 text-sm shadow-[var(--shadow-card)]">
                     <div>
                       <p className="font-medium">{it.label}
                         {it.kpr_excluded ? (
                           <span data-testid="ar-item-kpr-excluded" className="ml-1.5 rounded-full bg-amber-50 px-1.5 text-[10px] font-normal text-amber-800">tagihan terpisah · bukan KPR</span>
+                        ) : null}
+                        {it.payer === "bank" && !it.kpr_excluded ? (
+                          <span data-testid="ar-item-bank" className="ml-1.5 rounded-full bg-sky-100 px-1.5 text-[10px] font-normal text-sky-800">porsi bank · pencairan KPR</span>
                         ) : null}
                       </p>
                       <p className="text-[11px] text-muted-foreground">Jatuh tempo {formatDateWIB(it.due_date)}</p>

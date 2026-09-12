@@ -245,7 +245,8 @@ export function DisburseDialog({ open, onOpenChange, financing, onDone }) {
       }
       const sr = await api.get("/kpr-disbursement-schemes", { params: { bank: app?.bank_name || financing.bank_name || "" } })
         .then((r) => r.data).catch(() => ({ data: [] }));
-      setCtx({ loading: false, contract, app, schemes: sr.data || [], defaultId: sr.default_id || null });
+      const ar = await api.get(`/finance/ar/${financing.deal_id}`).then((r) => r.data?.data).catch(() => null);
+      setCtx({ loading: false, contract, app, schemes: sr.data || [], defaultId: sr.default_id || null, ar });
       setPick(sr.default_id || "");
     } catch { setCtx({ loading: false, contract: null, app: null, schemes: [], defaultId: null }); }
   };
@@ -256,10 +257,12 @@ export function DisburseDialog({ open, onOpenChange, financing, onDone }) {
     load();
   }, [open, financing]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { contract, app } = ctx;
+  const { contract, app, ar } = ctx;
+  const kprOutstanding = ar ? Number(ar.kpr_outstanding ?? ar.outstanding ?? 0) : null;
+  const bankTotal = Number(ar?.bank_total || 0);
   const tranches = app?.tranches || [];
   const openTranches = tranches.filter((t) => t.status !== "dicairkan");
-  const hasAkad = !!(app?.akad?.date);
+  const hasAkad = !!(app?.akad?.date || contract?.legal?.akad_kredit);
   const plafon = Number(app?.approved_plafon || app?.plafon || financing?.plafon || 0);
   const remaining = plafon - Number(app?.disbursed_total || financing?.disbursed_total || 0);
   const chosen = tranches.find((t) => t.code === form.tranche_code);
@@ -300,7 +303,15 @@ export function DisburseDialog({ open, onOpenChange, financing, onDone }) {
     : !contract ? "Kontrak unit ini belum terbentuk — aktifkan kontrak / konfirmasi booking dulu."
       : !app ? "Pengajuan KPR belum tertaut ke kontrak."
         : !hasAkad ? "Akad kredit belum tercatat — catat tahap AKAD KREDIT di tab Kontrak & Legal › KPR sebelum bank mencairkan."
-          : null;
+          : kprOutstanding === 0
+            ? (bankTotal > 0
+              ? "Porsi bank pada jadwal tagihan sudah LUNAS lewat kuitansi setoran pembeli — tidak ada piutang yang bisa dilunasi pencairan ini. Bila kuitansi itu salah input, hapus kuitansinya di Keuangan › Piutang (Direksi/Super Admin) lalu catat pencairan di sini."
+              : "Sisa piutang unit sudah 0 — tidak ada tagihan yang bisa dilunasi pencairan bank.")
+            : null;
+
+  const arHint = ar && kprOutstanding > 0
+    ? `Pencairan melunasi ${bankTotal > 0 ? "porsi bank" : "termin unit"} · sisa ${formatIDR(kprOutstanding)}${Number(ar.buyer_outstanding || 0) > 0 && bankTotal > 0 ? ` · porsi pembeli ${formatIDR(ar.buyer_outstanding)} tetap disetor pembeli` : ""}`
+    : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -315,6 +326,9 @@ export function DisburseDialog({ open, onOpenChange, financing, onDone }) {
         {ctx.loading ? <p className="text-sm text-muted-foreground">Memuat skema pencairan…</p> : null}
         {blocker ? (
           <p data-testid="financing-disburse-blocker" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] text-amber-900">{blocker}</p>
+        ) : null}
+        {!blocker && arHint ? (
+          <p data-testid="financing-disburse-ar-hint" className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[12px] text-sky-900">{arHint}</p>
         ) : null}
 
         {!ctx.loading && contract && app && !tranches.length ? (

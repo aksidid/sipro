@@ -1,5 +1,14 @@
 # PRD — SIPRO Property Development OS (lanjutan dari repo pandeyoga/dadada)
 
+## Sesi 2026-09-12 #3 — Piutang: porsi bank vs porsi pembeli, breakdown all-in exclude (iteration 36) — SELESAI
+- Laporan owner: (a) breakdown biaya all-in "exclude" tidak tampil di piutang, (b) terima pembayaran memaksa bayar FULL, (c) setoran pembeli melunasi termin KPR → pencairan bank tertolak.
+- Termin AR `payer` buyer|bank (`payment_scheme_engine.normalize_terms`, `TermIn.payer`, `compute_scheme_items`); `infer_bank_items` menandai label KPR/pencairan/bank pada skema KPR; migrasi `bank_portion_items` untuk AR lama.
+- `_allocate(payer, allow_bank_portion)`: setoran pembeli melewati porsi bank (eksplisit → 400 kecuali `allow_bank_portion`), kelebihan atas `buyer_outstanding` ditolak dengan hint porsi bank; pencairan (method kpr) melunasi porsi bank dulu; `kpr_outstanding` = sisa porsi bank; `apply_deposit` hanya porsi pembeli.
+- `live_breakdown`: rincian AR mengikuti `contracts.costs.components` (all-in dipilih/diamandemen di kontrak) — komponen exclude & developer_borne tampil + baris COST di payment_breakdown.
+- Akad legal kontrak dicermin ke `financing_apps.akad`; `kpr_disburse.disburse` menerima akad dari legal kontrak.
+- UI: `ReceiptDialog` (nominal bawaan = termin pembeli berikutnya, kotak porsi bank + checkbox `ar-receipt-allow-bank`), `ArDetailSheet` (`ar-payer-split`, tag `ar-item-bank`, daftar komponen all-in `ar-cost-component-row`), `PaymentSchemePanel` saklar porsi bank (jenis KPR), `CustomerPaymentPlanTab` tag & info split, `DisburseDialog` hint/blocker porsi bank.
+- Uji: `tests/test_ar_bank_portion_2026_09_12.py` 7/7; E2E API setoran → pencairan T1 → cancel → hapus kuitansi lulus; testing agent iteration_36 backend 100%, UI lulus.
+
 ## Sesi 2026-09-12 #2 — Pemulihan repo gabatafaja/sipro + tuntaskan 5 catatan owner (iteration 35) — SELESAI
 - Lingkungan: clone `gabatafaja/sipro` → `/app`; `backend/.env` (`JWT_SECRET`, `SEED_DEMO_USERS=true`, `STORAGE_PROVIDER=mongo`, `DEFAULT_ORG_ID`, `PORTAL_MASTER_OTP`); deps (`emergentintegrations` dipasang terpisah dari index Emergent); `memory/test_credentials.md` diisi.
 - `backend/tests/test_owner_notes_2026_09_12.py`: setting kini diubah via `PUT /settings/{key}` (tulisan langsung ke Mongo tanpa `scope` tidak terbaca `settings_store`); fixture `kpr_contract` mencabut `legal.akad_kredit`/`deals.akad_at` run sebelumnya → idempoten. 5 passed / 1 skipped (add-on AR tidak ada di seed).
